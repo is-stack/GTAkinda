@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Open-World Mini Demo (Browser)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    html,body{height:100%;margin:0;overflow:hidden;background:#111}
+    #overlay{
+      position:fixed;left:10px;top:10px;color:#fff;font-family:Arial,Helvetica,sans-serif;
+      z-index:20;background:rgba(0,0,0,0.45);padding:10px;border-radius:8px;
+      min-width:160px;
+    }
+    #centerMsg{
+      position:fixed;left:50%;top:10%;transform:translateX(-50%);color:#fff;
+      z-index:20;font-family:Arial,Helvetica,sans-serif;background:rgba(0,0,0,0.6);
+      padding:12px;border-radius:8px;
+    }
+    button{padding:8px 12px;border-radius:6px;border:0;background:#28a; color:white}
+    canvas{display:block}
+    #instructions{font-size:13px;line-height:1.4}
+    #hud{position:fixed;right:12px;top:10px;color:#fff;font-family:monospace;background:rgba(0,0,0,0.35);padding:8px;border-radius:6px}
+  </style>
+</head>
+<body>
+<div id="overlay">
+  <div style="font-weight:bold;margin-bottom:6px">Mini Open-World Demo</div>
+  <div id="instructions">
+    Click <b>Play</b> then click inside canvas to lock mouse.<br>
+    WASD = move, Shift = run, Space = jump (approx),<br>
+    E = enter/exit vehicle, LMB = shoot.<br>
+    Press <b>Esc</b> to release mouse.
+  </div>
+  <div style="margin-top:8px">
+    <button id="playBtn">Play</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+</div>
+<div id="centerMsg" style="display:none"></div>
+<div id="hud">Ammo: <span id="ammo">30</span><br>Health: <span id="health">100</span></div>
+
+<script src="https://unpkg.com/three@0.154.0/build/three.min.js"></script>
+<script>
+/*
+  Single-file simple 3D mini demo inspired by open-world mechanics.
+  - Player can walk, look with mouse (pointer lock), enter/exit a simple car, drive it, and shoot.
+  - NPC patrols and chases if player is close; can take damage.
+  - Simple HUD and controls. Works in modern desktop browsers.
+*/
+
+// --- Basic setup ---
+let scene, camera, renderer, clock;
+let player, vehicle, npc, ground;
+let keys = {};
+let pointerLocked = false;
+let velocity = new THREE.Vector3();
+let cameraPitch = 0, cameraYaw = 0;
+let canJump = true;
+let onGround = true;
+let inVehicle = false;
+let ammo = 30, maxAmmo = 30;
+let health = 100;
+const GRAVITY = 30;
+const WALK_SPEED = 6;
+const RUN_SPEED = 12;
+const JUMP_VEL = 10;
+const RAD = Math.PI/180;
+const raycaster = new THREE.Raycaster();
+let crosshair, infoDiv;
+let messages = document.getElementById('centerMsg');
+
+// initialize
+init();
+animate();
+
+function init(){
+  // renderer
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  // scene and camera
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+
+  clock = new THREE.Clock();
+
+  // lights
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+  hemi.position.set(0,200,0);
+  scene.add(hemi);
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(-50,80,60);
+  scene.add(dir);
+
+  // ground
+  const groundMat = new THREE.MeshStandardMaterial({color:0x3a712b});
+  const groundGeo = new THREE.PlaneGeometry(400,400);
+  ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI/2;
+  ground.receiveShadow = true;
+  scene.add(ground);
+
+  // simple environment: boxes as buildings
+  const boxGeo = new THREE.BoxGeometry(8,8,8);
+  const boxMat = new THREE.MeshStandardMaterial({color:0x666666});
+  for(let i=0;i<60;i++){
+    const b = new THREE.Mesh(boxGeo, boxMat);
+    b.position.set((Math.random()-0.5)*200,4,(Math.random()-0.5)*200);
+    b.scale.y = 1 + Math.random()*4;
+    scene.add(b);
+  }
+
+  // player (invisible body) - will be represented by camera; give a capsule collider approximation
+  player = new THREE.Object3D();
+  player.position.set(0,2,8);
+  scene.add(player);
+  camera.position.set(0,1.6,0);
+  player.add(camera);
+
+  // vehicle (a simple car cube)
+  const carGeo = new THREE.BoxGeometry(2.6,1,4);
+  const carMat = new THREE.MeshStandardMaterial({color:0x0055ff});
+  vehicle = new THREE.Mesh(carGeo, carMat);
+  vehicle.position.set(4,0.6,6);
+  vehicle.userData = {speed:0,driver:null};
+  scene.add(vehicle);
+
+  // NPC (sphere)
+  const npcGeo = new THREE.SphereGeometry(0.8,16,16);
+  const npcMat = new THREE.MeshStandardMaterial({color:0xff3333});
+  npc = new THREE.Mesh(npcGeo, npcMat);
+  npc.position.set(-10,0.8,-6);
+  npc.userData = {hp:100, state:'patrol', patrol:[new THREE.Vector3(-10,0.8,-6), new THREE.Vector3(-12,0.8,10), new THREE.Vector3(8,0.8,12)], idx:0};
+  scene.add(npc);
+
+  // skybox-ish ground fog
+  scene.fog = new THREE.Fog(0x87ceeb, 60, 220);
+
+  // crosshair (simple)
+  crosshair = document.createElement('div');
+  crosshair.style.position = 'fixed';
+  crosshair.style.left = '50%';
+  crosshair.style.top = '50%';
+  crosshair.style.transform = 'translate(-50%,-50%)';
+  crosshair.style.width = '10px';
+  crosshair.style.height = '10px';
+  crosshair.style.borderRadius = '50%';
+  crosshair.style.background = 'rgba(255,255,255,0.8)';
+  crosshair.style.zIndex = 10;
+  document.body.appendChild(crosshair);
+
+  // HUD references
+  document.getElementById('ammo').innerText = ammo;
+  document.getElementById('health').innerText = health;
+
+  // events
+  window.addEventListener('resize', onWindowResize);
+  document.addEventListener('keydown', (e)=>{ keys[e.code]=true; });
+  document.addEventListener('keyup', (e)=>{ keys[e.code]=false; });
+  renderer.domElement.addEventListener('click', onCanvasClick);
+  document.addEventListener('pointerlockchange', onPointerLockChange);
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('mousedown', onMouseDown);
+
+  document.getElementById('playBtn').addEventListener('click', ()=>{
+    messages.style.display='none';
+    startGame();
+  });
+  document.getElementById('resetBtn').addEventListener('click', ()=>{ resetGame(); });
+
+  // place an initial message
+  showMessage('Press Play then click the game area to lock mouse', 6);
+}
+
+// --- Input & pointer lock ---
+function startGame(){
+  renderer.domElement.requestPointerLock();
+  // ensure ammo/health reset
+  ammo = maxAmmo; health = 100;
+  updateHUD();
+}
+
+function onCanvasClick(){
+  if(document.pointerLockElement === renderer.domElement) return;
+  renderer.domElement.requestPointerLock();
+}
+
+function onPointerLockChange(){
+  pointerLocked = (document.pointerLockElement === renderer.domElement);
+}
+
+function onMouseMove(e){
+  if(!pointerLocked) return;
+  const movementX = e.movementX || 0;
+  const movementY = e.movementY || 0;
+  cameraYaw -= movementX * 0.0022;
+  cameraPitch -= movementY * 0.0022;
+  cameraPitch = Math.max(-Math.PI/2+0.1, Math.min(Math.PI/2-0.1, cameraPitch));
+  player.rotation.y = cameraYaw;
+  camera.rotation.x = cameraPitch;
+}
+
+function onMouseDown(e){
+  if(e.button === 0){
+    tryShoot();
+  }
+}
+
+// --- Game loop ---
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = Math.min(0.05, clock.getDelta());
+  update(dt);
+  renderer.render(scene, camera);
+}
+
+function update(dt){
+  // NPC behaviour simple state machine
+  updateNPC(dt);
+
+  if(inVehicle){
+    updateVehicle(dt);
+  } else {
+    updatePlayerMovement(dt);
+  }
+
+  // small collision with vehicle detection to prevent falling through
+  if(player.position.y < -10){
+    // fell off world -> reset
+    resetPlayer();
+  }
+}
+
+function updatePlayerMovement(dt){
+  // WASD movement relative to player rotation
+  let forward = new THREE.Vector3(0,0,-1).applyQuaternion(player.quaternion);
+  forward.y = 0; forward.normalize();
+  let right = new THREE.Vector3(1,0,0).applyQuaternion(player.quaternion);
+  right.y=0; right.normalize();
+
+  let speed = keys['ShiftLeft'] ? RUN_SPEED : WALK_SPEED;
+  let move = new THREE.Vector3();
+  if(keys['KeyW']) move.add(forward);
+  if(keys['KeyS']) move.add(forward.clone().negate());
+  if(keys['KeyA']) move.add(right.clone().negate());
+  if(keys['KeyD']) move.add(right);
+
+  if(move.length() > 0){
+    move.normalize();
+    velocity.x = move.x * speed;
+    velocity.z = move.z * speed;
+  } else {
+    velocity.x = THREE.MathUtils.lerp(velocity.x, 0, dt*8);
+    velocity.z = THREE.MathUtils.lerp(velocity.z, 0, dt*8);
+  }
+
+  // gravity & jumping (very simple)
+  if(onGround && keys['Space']){
+    velocity.y = JUMP_VEL;
+    onGround = false;
+  } else if(!onGround){
+    velocity.y -= GRAVITY * dt;
+  }
+
+  // integrate
+  player.position.addScaledVector(velocity, dt);
+
+  // ground collision
+  if(player.position.y <= 2){
+    player.position.y = 2;
+    velocity.y = 0;
+    onGround = true;
+  }
+
+  // interact key - enter vehicle
+  if(keys['KeyE']){
+    // try to enter nearest vehicle within 3 units (one-shot until released)
+    if(tryEnterVehicle()){
+      keys['KeyE'] = false; // prevent repeat entering
+    }
+  }
+}
+
+function tryEnterVehicle(){
+  if(inVehicle) return false;
+  const dist = player.position.distanceTo(vehicle.position);
+  if(dist < 3.2){
+    enterVehicle();
+    return true;
+  }
+  return false;
+}
+
+function enterVehicle(){
+  inVehicle = true;
+  vehicle.userData.driver = player;
+  // move camera to sit behind car using an offset node
+  // attach camera to vehicle for simplicity
+  vehicle.add(camera);
+  camera.position.set(0,1.1,-3.2);
+  camera.rotation.set(0,0,0);
+  // hide crosshair slightly to indicate vehicle control
+  crosshair.style.background = 'rgba(255,255,255,0.5)';
+  showMessage('You entered the vehicle. WASD to drive, E to exit.', 3);
+}
+
+function exitVehicle(){
+  if(!inVehicle) return;
+  inVehicle = false;
+  vehicle.userData.driver = null;
+  // reattach camera to player
+  scene.add(camera);
+  camera.position.set(0,1.6,0);
+  player.add(camera);
+  // place player next to car
+  player.position.copy(vehicle.position).add(new THREE.Vector3(2,0,0));
+  crosshair.style.background = 'rgba(255,255,255,0.8)';
+  showMessage('Exited vehicle.', 2);
+}
+
+// --- Vehicle update (very simple physics) ---
+function updateVehicle(dt){
+  // steering & throttle via player keys
+  let throttle = 0;
+  if(keys['KeyW']) throttle += 1;
+  if(keys['KeyS']) throttle -= 0.7;
+  let steer = 0;
+  if(keys['KeyA']) steer += 1;
+  if(keys['KeyD']) steer -= 1;
+
+  // integrate vehicle forward vector
+  let forward = new THREE.Vector3(0,0,-1).applyQuaternion(vehicle.quaternion);
+  forward.y = 0; forward.normalize();
+
+  // accelerate
+  vehicle.userData.speed = THREE.MathUtils.clamp((vehicle.userData.speed || 0) + throttle * 10 * dt - vehicle.userData.speed * 0.5 * dt, -30, 60);
+  // apply movement
+  vehicle.position.addScaledVector(forward, vehicle.userData.speed * dt);
+
+  // apply simple steering modifying quaternion
+  if(Math.abs(steer) > 0.01){
+    vehicle.rotateY(steer * 0.8 * vehicle.userData.speed/30 * dt);
+  }
+
+  // exit with E
+  if(keys['KeyE']){
+    exitVehicle();
+    keys['KeyE'] = false;
+  }
+}
+
+// --- Shooting ---
+let lastShot = 0;
+const FIRE_RATE = 0.18;
+function tryShoot(){
+  const now = performance.now() / 1000;
+  if(now - lastShot < FIRE_RATE) return;
+  if(ammo <= 0){ showMessage('Out of ammo!', 1); return; }
+  lastShot = now;
+  ammo -= 1;
+  updateHUD();
+  // raycast from camera center
+  raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+  const hits = raycaster.intersectObject(npc, true);
+  if(hits.length > 0){
+    // hit NPC
+    npc.userData.hp -= 30;
+    showMessage('Hit! NPC HP: ' + Math.max(0, npc.userData.hp), 1.2);
+    if(npc.userData.hp <= 0){
+      // "kill" npc
+      scene.remove(npc);
+      showMessage('NPC defeated!', 2.2);
+    }
+  }
+  // small recoil visual - move camera slightly
+  camera.position.y -= 0.02;
+  setTimeout(()=>{ if(camera) camera.position.y += 0.02; }, 60);
+}
+
+// --- NPC simple AI ---
+function updateNPC(dt){
+  if(!npc.parent) return;
+  const ppos = player.position.clone();
+  const dist = npc.position.distanceTo(ppos);
+  // If NPC dead removed earlier
+  if(npc.userData.hp <= 0) return;
+  if(dist < 15){
+    // chase
+    npc.userData.state = 'chase';
+    const dir = ppos.clone().sub(npc.position); dir.y = 0; dir.normalize();
+    npc.position.addScaledVector(dir, 3.5 * dt);
+    // if close, damage player slowly
+    if(npc.position.distanceTo(ppos) < 1.6){
+      health = Math.max(0, health - 20 * dt);
+      updateHUD();
+      if(health <= 0){
+        showMessage('You died! Press Reset to try again.', 4);
+      }
+    }
+  } else {
+    // patrol
+    npc.userData.state = 'patrol';
+    const pt = npc.userData.patrol[npc.userData.idx];
+    const to = pt.clone().sub(npc.position); to.y = 0;
+    if(to.length() < 0.6){
+      npc.userData.idx = (npc.userData.idx + 1) % npc.userData.patrol.length;
+    } else {
+      npc.position.addScaledVector(to.normalize(), 1.8 * dt);
+    }
+  }
+}
+
+// --- Utilities & HUD ---
+function updateHUD(){
+  document.getElementById('ammo').innerText = ammo;
+  document.getElementById('health').innerText = Math.floor(health);
+}
+
+function showMessage(text, seconds=2){
+  messages.style.display = 'block';
+  messages.innerText = text;
+  if(seconds>0){
+    setTimeout(()=>{ messages.style.display='none'; }, seconds*1000);
+  }
+}
+
+// --- Reset & helpers ---
+function resetPlayer(){
+  player.position.set(0,2,8);
+  velocity.set(0,0,0);
+  cameraPitch = 0; cameraYaw = 0;
+  player.rotation.set(0,0,0);
+  updateHUD();
+}
+
+function resetGame(){
+  // restore NPC
+  if(!npc.parent){
+    scene.add(npc);
+    npc.userData.hp = 100;
+    npc.position.set(-10,0.8,-6);
+  } else {
+    npc.userData.hp = 100;
+    npc.position.set(-10,0.8,-6);
+  }
+  // reset player & vehicle
+  resetPlayer();
+  vehicle.position.set(4,0.6,6);
+  vehicle.userData.speed = 0;
+  if(inVehicle) exitVehicle();
+  ammo = maxAmmo;
+  health = 100;
+  updateHUD();
+  showMessage('Game reset', 1);
+}
+
+// responsive
+function onWindowResize(){
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+</script>
+</body>
+</html>
