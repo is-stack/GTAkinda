@@ -2,417 +2,594 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mini GTA-like Driving Demo</title>
+  <title>Mini City — Single-player Demo</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    html,body{height:100%;margin:0;overflow:hidden;background:#111}
+    html,body{height:100%;margin:0;background:#111;overflow:hidden;font-family:Inter,Arial,Helvetica,sans-serif}
     #overlay{
-      position:fixed;left:10px;top:10px;color:#fff;font-family:Arial,Helvetica,sans-serif;
-      z-index:20;background:rgba(0,0,0,0.45);padding:10px;border-radius:8px;
-      min-width:160px;
+      position:fixed;left:12px;top:12px;color:#fff;z-index:30;
+      background:rgba(0,0,0,0.45);padding:12px;border-radius:8px;min-width:220px;
+      box-shadow:0 6px 20px rgba(0,0,0,0.6)
     }
+    #overlay input, #overlay button { font-size:13px; padding:6px; margin-top:6px; }
+    #overlay label{font-size:13px; color:#ddd}
     #centerMsg{
       position:fixed;left:50%;top:10%;transform:translateX(-50%);color:#fff;
-      z-index:20;font-family:Arial,Helvetica,sans-serif;background:rgba(0,0,0,0.6);
-      padding:12px;border-radius:8px;
+      z-index:30;background:rgba(0,0,0,0.6);padding:10px;border-radius:8px;display:none;
     }
-    button{padding:8px 12px;border-radius:6px;border:0;background:#28a; color:white}
-    canvas{display:block}
-    #instructions{font-size:13px;line-height:1.4}
-    #hud{position:fixed;right:12px;top:10px;color:#fff;font-family:monospace;background:rgba(0,0,0,0.35);padding:8px;border-radius:6px}
+    #hud{position:fixed;right:14px;top:12px;color:#fff;z-index:30;background:rgba(0,0,0,0.35);padding:10px;border-radius:8px;font-family:monospace}
+    .label3d{position:fixed;pointer-events:none;color:#fff;background:rgba(0,0,0,0.5);padding:2px 6px;border-radius:6px;font-size:12px;transform:translate(-50%,-100%);z-index:29}
+    button{border:0;border-radius:6px;background:#1677ff;color:white;cursor:pointer}
+    #small{font-size:12px;color:#bdbdbd;margin-top:6px}
+    #minimap{position:fixed;right:14px;bottom:14px;width:160px;height:160px;background:rgba(0,0,0,0.45);border-radius:6px;z-index:30;padding:6px}
   </style>
 </head>
 <body>
-<div id="overlay">
-  <div style="font-weight:bold;margin-bottom:6px">Mini GTA-like Driving Demo</div>
-  <div id="instructions">
-    Click <b>Play</b> then click inside canvas to lock mouse.<br>
-    WASD = walk / drive, Shift = run, Space = jump (walking only),<br>
-    E = enter/exit nearest vehicle, LMB = shoot (not implemented yet).<br>
-    Esc = release mouse.
+  <div id="overlay">
+    <div style="font-weight:700;font-size:15px">Mini City — Demo</div>
+    <label for="name">Player name (persistent)</label><br>
+    <input id="name" placeholder="Enter name" /><br>
+    <button id="saveName">Set name</button>
+    <div id="small">Controls: WASD = move/drive, Shift = run, Space = jump, E = enter/exit car, LMB = horn</div>
+    <div style="margin-top:8px">
+      <button id="playBtn">Play</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+    <div id="status" style="margin-top:8px;color:#9fd"></div>
   </div>
-  <div style="margin-top:8px">
-    <button id="playBtn">Play</button>
-    <button id="resetBtn">Reset</button>
-  </div>
-</div>
-<div id="centerMsg" style="display:none"></div>
-<div id="hud">Mode: <span id="mode">On Foot</span><br>Speed: <span id="speed">0</span> km/h<br>Health: <span id="health">100</span></div>
 
-<script src="https://unpkg.com/three@0.154.0/build/three.min.js"></script>
+  <div id="centerMsg"></div>
+  <div id="hud">
+    Mode: <span id="mode">Idle</span><br>
+    Speed: <span id="speed">0</span> km/h<br>
+    Health: <span id="health">100</span>
+  </div>
+
+  <div id="minimap" title="Mini-map (very rough)"></div>
+
+  <div id="labelsContainer"></div>
+
+  <!-- Three.js from CDN -->
+  <script src="https://unpkg.com/three@0.154.0/build/three.min.js"></script>
+
 <script>
 /*
-  Upgraded mini GTA-like demo with multiple cars and improved driving physics.
-  - Player can walk around, enter/exit nearest car.
-  - Driving includes acceleration, braking, steering with inertia.
-  - Smooth camera transitions and HUD updates.
+  Single-file Single-player demo:
+  - Three.js for rendering
+  - Simple physics approximations for characters and vehicles
+  - NPCs: simple finite state machine (patrol / wander / chase)
+  - Username saved in localStorage
+  - Hooks comments for adding multiplayer (socket.io) later
+
+  Save this file as index.html and open it in a modern browser.
 */
 
+// ---------- CONFIG ----------
+const CONFIG = {
+  PLAYER_HEIGHT: 1.8,
+  GROUND_Y: 0,
+  WALK_SPEED: 6,
+  RUN_SPEED: 12,
+  JUMP_VELOCITY: 8,
+  GRAVITY: 28,
+  CAR_TYPES: [
+    { color: 0x0055ff, scale: 1.0, maxSpeedKmh: 120, accel: 8, brake: 20, turning: 0.5 },
+    { color: 0xff5500, scale: 1.2, maxSpeedKmh: 100, accel: 6, brake: 18, turning: 0.45 },
+    { color: 0x22aa22, scale: 0.9, maxSpeedKmh: 140, accel: 10, brake: 24, turning: 0.6 }
+  ],
+  NPC_COUNT: 6,
+  CITY_SIZE: 140
+};
+
+// ---------- State ----------
 let scene, camera, renderer, clock;
-let player, cars = [], npc, ground;
+let playerObj, cameraPivot;
 let keys = {};
 let pointerLocked = false;
 let velocity = new THREE.Vector3();
-let cameraPitch = 0, cameraYaw = 0;
-let canJump = true;
 let onGround = true;
-let inVehicle = false;
-let currentCar = null;
-let health = 100;
-let speed = 0;
-const GRAVITY = 30;
-const WALK_SPEED = 6;
-const RUN_SPEED = 12;
-const JUMP_VEL = 10;
-const MAX_SPEED_KMH = 120; // max car speed
-const KMH_TO_MPS = 1000/3600; // conversion factor
+let cameraPitch = 0, cameraYaw = 0;
+let inVehicle = false, currentVehicle = null;
+let cars = [];
+let npcs = [];
+let username = localStorage.getItem('mini_city_name') || '';
+let hudMode = document.getElementById('mode'), hudSpeed = document.getElementById('speed'), hudHealth = document.getElementById('health');
+let centerMsg = document.getElementById('centerMsg');
+let labelsContainer = document.getElementById('labelsContainer');
+let minimapCanvas, minimapCtx;
 
-const raycaster = new THREE.Raycaster();
-let messages = document.getElementById('centerMsg');
-let hudMode = null, hudSpeed = null, hudHealth = null;
+// Init UI values
+document.getElementById('name').value = username;
+document.getElementById('status').innerText = username ? `Welcome back, ${username}` : 'Set your name to persist it locally';
 
-init();
-animate();
-
-function init(){
-  renderer = new THREE.WebGLRenderer({antialias:true});
+// ---------- INITIALIZE THREE SCENE ----------
+function init() {
+  // renderer
+  renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.shadowMap.enabled = true;
   document.body.appendChild(renderer.domElement);
 
+  // scene & camera
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x87ceeb);
-  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+  scene.fog = new THREE.Fog(0x87ceeb, 120, 400);
 
+  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
   clock = new THREE.Clock();
 
-  const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
-  hemi.position.set(0,200,0);
+  // lights
+  const hemi = new THREE.HemisphereLight(0xffffff, 0x444455, 0.8);
   scene.add(hemi);
-  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-  dir.position.set(-50,80,60);
-  scene.add(dir);
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(-50, 80, 60);
+  sun.castShadow = true;
+  sun.shadow.camera.left = -150; sun.shadow.camera.right = 150; sun.shadow.camera.top = 150; sun.shadow.camera.bottom = -150;
+  scene.add(sun);
 
   // ground
-  const groundMat = new THREE.MeshStandardMaterial({color:0x3a712b});
-  const groundGeo = new THREE.PlaneGeometry(400,400);
-  ground = new THREE.Mesh(groundGeo, groundMat);
+  const groundMat = new THREE.MeshStandardMaterial({ color: 0x2f6d2b });
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.CITY_SIZE*3, CONFIG.CITY_SIZE*3), groundMat);
   ground.rotation.x = -Math.PI/2;
   ground.receiveShadow = true;
+  ground.position.y = CONFIG.GROUND_Y;
   scene.add(ground);
 
-  // environment boxes
+  // city: place many boxes as buildings
   const boxGeo = new THREE.BoxGeometry(8,8,8);
-  const boxMat = new THREE.MeshStandardMaterial({color:0x666666});
-  for(let i=0;i<60;i++){
+  const boxMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
+  for (let i=0;i<140;i++){
     const b = new THREE.Mesh(boxGeo, boxMat);
-    b.position.set((Math.random()-0.5)*200,4,(Math.random()-0.5)*200);
-    b.scale.y = 1 + Math.random()*4;
+    b.scale.y = 1 + Math.random()*6;
+    b.position.set((Math.random()-0.5)*CONFIG.CITY_SIZE, b.scale.y*4, (Math.random()-0.5)*CONFIG.CITY_SIZE);
+    b.castShadow = true; b.receiveShadow = false;
     scene.add(b);
   }
 
-  // player object
-  player = new THREE.Object3D();
-  player.position.set(0,2,8);
-  scene.add(player);
-  camera.position.set(0,1.6,0);
-  player.add(camera);
+  // player root
+  playerObj = new THREE.Object3D();
+  playerObj.position.set(0, CONFIG.PLAYER_HEIGHT, 6);
+  scene.add(playerObj);
 
-  // create cars (multiple)
-  createCar(new THREE.Vector3(4,0.6,6), 0x0055ff, 1.0);    // compact car
-  createCar(new THREE.Vector3(-12,0.6,-8), 0xff5500, 1.2); // bigger car
-  createCar(new THREE.Vector3(15,0.6,-10), 0x22aa22, 0.9);  // smaller car
+  // camera pivot is at player's head
+  cameraPivot = new THREE.Object3D(); cameraPivot.position.set(0,0,0); playerObj.add(cameraPivot);
+  camera.position.set(0, 0, 0);
+  cameraPivot.add(camera);
+  camera.position.set(0, 0.05, 0.01); // small offset - camera is attached to pivot; we'll offset later while driving
 
-  // HUD refs
-  hudMode = document.getElementById('mode');
-  hudSpeed = document.getElementById('speed');
-  hudHealth = document.getElementById('health');
-  updateHUD();
+  // add a simple visible "body" for debugging (invisible normally)
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0xffcc77 });
+  const bodyMesh = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), bodyMat);
+  bodyMesh.visible = false;
+  bodyMesh.castShadow = true;
+  playerObj.add(bodyMesh);
 
+  // create cars in world
+  let startPositions = [ new THREE.Vector3(4,0.6,6), new THREE.Vector3(-12,0.6,-8), new THREE.Vector3(15,0.6,-10) ];
+  for (let i=0;i<CONFIG.CAR_TYPES.length;i++){
+    const t = CONFIG.CAR_TYPES[i];
+    createCar(startPositions[i], t.color, t.scale, t.maxSpeedKmh, t.accel, t.brake, t.turning);
+  }
+
+  // NPCs
+  for (let i=0;i<CONFIG.NPC_COUNT;i++){
+    spawnNPC();
+  }
+
+  // HUD & minimap
+  setupMinimap();
+
+  // event listeners
   window.addEventListener('resize', onWindowResize);
-  document.addEventListener('keydown', (e)=>{ keys[e.code]=true; });
-  document.addEventListener('keyup', (e)=>{ keys[e.code]=false; });
-  renderer.domElement.addEventListener('click', onCanvasClick);
-  document.addEventListener('pointerlockchange', onPointerLockChange);
-  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('keydown', e => { keys[e.code] = true; });
+  document.addEventListener('keyup', e => { keys[e.code] = false; });
+  renderer.domElement.addEventListener('click', () => { if(!pointerLocked) renderer.domElement.requestPointerLock(); });
+  document.addEventListener('pointerlockchange', () => { pointerLocked = (document.pointerLockElement === renderer.domElement); });
 
-  document.getElementById('playBtn').addEventListener('click', ()=>{  
-    messages.style.display='none';
-    startGame();
+  document.addEventListener('mousemove', (e) => {
+    if(!pointerLocked) return;
+    cameraYaw -= e.movementX * 0.0022;
+    cameraPitch -= e.movementY * 0.0022;
+    cameraPitch = Math.max(-Math.PI/2+0.1, Math.min(Math.PI/2-0.1, cameraPitch));
+    playerObj.rotation.y = cameraYaw;
+    camera.rotation.x = cameraPitch;
   });
-  document.getElementById('resetBtn').addEventListener('click', ()=>{ resetGame(); });
 
-  showMessage('Press Play then click the game area to lock mouse', 6);
-}
-
-function createCar(pos, color, scale){
-  const carGeo = new THREE.BoxGeometry(2.6,1,4);
-  const carMat = new THREE.MeshStandardMaterial({color:color});
-  const car = new THREE.Mesh(carGeo, carMat);
-  car.position.copy(pos);
-  car.scale.setScalar(scale);
-  car.userData = {
-    speed:0,
-    acceleration:0,
-    steering:0,
-    maxSpeed: 120 * KMH_TO_MPS,
-    maxReverseSpeed: -30 * KMH_TO_MPS,
-    maxAcceleration: 8,
-    maxBrake: 15,
-    maxSteering: 0.5,
-    driver: null
+  // UI buttons
+  document.getElementById('saveName').onclick = () => {
+    username = document.getElementById('name').value.trim() || 'Player';
+    localStorage.setItem('mini_city_name', username);
+    document.getElementById('status').innerText = `Name saved: ${username}`;
   };
-  scene.add(car);
-  cars.push(car);
+  document.getElementById('playBtn').onclick = () => {
+    showMessage('Click inside the canvas to lock mouse and control. Press E to enter nearest car.', 4);
+    document.getElementById('status').innerText = username ? `Playing as ${username}` : 'Playing (no name set)';
+  };
+  document.getElementById('resetBtn').onclick = resetWorld;
+
+  showMessage('Ready! Set name then press Play. Click canvas to lock pointer.', 6);
 }
 
-function startGame(){
-  renderer.domElement.requestPointerLock();
-  health = 100;
-  updateHUD();
+// ---------- VEHICLE CREATION ----------
+function createCar(pos, color=0x0055ff, scale=1.0, maxSpeedKmh=120, accel=8, brake=20, turning=0.5){
+  const geo = new THREE.BoxGeometry(2.6,1,4);
+  const mat = new THREE.MeshStandardMaterial({ color });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.scale.setScalar(scale);
+  mesh.position.copy(pos);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  // vehicle state
+  mesh.userData = {
+    speed: 0,           // in meters/sec
+    accel: 0,
+    steering: 0,
+    maxSpeed: (maxSpeedKmh * 1000/3600),
+    maxReverse: -30*(1000/3600),
+    maxAccel: accel,
+    maxBrake: brake,
+    maxSteering: turning,
+    driver: null,
+    colorHex: color
+  };
+  scene.add(mesh);
+  cars.push(mesh);
+  // add label above car showing 'CAR' (optional)
+  const label = create3DLabel('CAR', mesh);
+  mesh.userData.label = label;
 }
 
-function onCanvasClick(){
-  if(document.pointerLockElement === renderer.domElement) return;
-  renderer.domElement.requestPointerLock();
+// ---------- NPC ----------
+function spawnNPC(){
+  const npcGeo = new THREE.SphereGeometry(0.6, 10, 10);
+  const npcMat = new THREE.MeshStandardMaterial({ color: 0xff3333 });
+  const n = new THREE.Mesh(npcGeo, npcMat);
+  n.castShadow = true;
+  // random start
+  n.position.set((Math.random()-0.5)*CONFIG.CITY_SIZE, 0.6, (Math.random()-0.5)*CONFIG.CITY_SIZE);
+  n.userData = {
+    hp: 100,
+    state: 'wander',
+    timer: 0,
+    target: new THREE.Vector3((Math.random()-0.5)*CONFIG.CITY_SIZE, 0.6, (Math.random()-0.5)*CONFIG.CITY_SIZE)
+  };
+  scene.add(n);
+  npcs.push(n);
+  create3DLabel('NPC', n);
 }
 
-function onPointerLockChange(){
-  pointerLocked = (document.pointerLockElement === renderer.domElement);
+// ---------- 3D label (DOM overlay) ----------
+function create3DLabel(text, parentMesh){
+  const el = document.createElement('div'); el.className = 'label3d'; el.innerText = text; labelsContainer.appendChild(el);
+  return { el, parent: parentMesh };
 }
 
-function onMouseMove(e){
-  if(!pointerLocked) return;
-  const movementX = e.movementX || 0;
-  const movementY = e.movementY || 0;
-  cameraYaw -= movementX * 0.0022;
-  cameraPitch -= movementY * 0.0022;
-  cameraPitch = Math.max(-Math.PI/2+0.1, Math.min(Math.PI/2-0.1, cameraPitch));
-  player.rotation.y = cameraYaw;
-  camera.rotation.x = cameraPitch;
-}
-
+// ---------- RENDER LOOP ----------
 function animate(){
   requestAnimationFrame(animate);
   const dt = Math.min(0.05, clock.getDelta());
   update(dt);
   renderer.render(scene, camera);
+  updateLabels();
+  drawMinimap();
 }
 
+// ---------- UPDATE ----------
 function update(dt){
-  if(inVehicle){
-    updateVehicle(dt);
-  } else {
+  // NPCs: simple AI
+  for (const n of npcs){
+    const ud = n.userData;
+    ud.timer -= dt;
+    if (ud.state === 'wander'){
+      // move toward target
+      let dir = ud.target.clone().sub(n.position); dir.y = 0;
+      if (dir.length() < 1.0 || ud.timer <= 0){
+        ud.target.set((Math.random()-0.5)*CONFIG.CITY_SIZE, 0.6, (Math.random()-0.5)*CONFIG.CITY_SIZE);
+        ud.timer = 2 + Math.random()*4;
+      } else {
+        dir.normalize();
+        n.position.addScaledVector(dir, 1.2 * dt);
+      }
+      // occasional switch to 'idle'
+      if (Math.random() < 0.002) ud.state = 'idle';
+    } else if (ud.state === 'idle'){
+      if (ud.timer <= 0) { ud.state = 'wander'; ud.timer = 1 + Math.random()*3; }
+    }
+    // simple collision avoidance (cars/players)
+    for (const car of cars){ if (car !== currentVehicle) avoidCollision(n, car, dt); }
+    avoidCollision(n, playerObj, dt);
+  }
+
+  // Player update (on foot)
+  if (!inVehicle){
     updatePlayerMovement(dt);
+  } else {
+    // if in vehicle, update vehicle physics
+    updateVehiclePhysics(dt, currentVehicle);
   }
-  if(player.position.y < -10){
-    resetPlayer();
-  }
+
+  // cars idle physics to apply friction if not driven
+  for (const c of cars){ if (c.userData.driver === null) { // slow to stop
+    if (Math.abs(c.userData.speed) > 0.001) c.userData.speed *= Math.max(0, 1 - dt*0.6);
+    // apply movement
+    const forward = new THREE.Vector3(0,0,-1).applyQuaternion(c.quaternion);
+    c.position.addScaledVector(forward, c.userData.speed * dt);
+  } }
 }
 
+// ---------- PLAYER MOVEMENT ----------
 function updatePlayerMovement(dt){
-  let forward = new THREE.Vector3(0,0,-1).applyQuaternion(player.quaternion);
+  const forward = new THREE.Vector3(0,0,-1).applyQuaternion(playerObj.quaternion);
   forward.y = 0; forward.normalize();
-  let right = new THREE.Vector3(1,0,0).applyQuaternion(player.quaternion);
-  right.y=0; right.normalize();
+  const right = new THREE.Vector3(1,0,0).applyQuaternion(playerObj.quaternion);
+  right.y = 0; right.normalize();
 
-  let speed = keys['ShiftLeft'] ? RUN_SPEED : WALK_SPEED;
+  const walkingSpeed = keys['ShiftLeft'] ? CONFIG.RUN_SPEED : CONFIG.WALK_SPEED;
   let move = new THREE.Vector3();
-  if(keys['KeyW']) move.add(forward);
-  if(keys['KeyS']) move.add(forward.clone().negate());
-  if(keys['KeyA']) move.add(right.clone().negate());
-  if(keys['KeyD']) move.add(right);
 
-  if(move.length() > 0){
+  if (keys['KeyW']) move.add(forward);
+  if (keys['KeyS']) move.add(forward.clone().negate());
+  if (keys['KeyA']) move.add(right.clone().negate());
+  if (keys['KeyD']) move.add(right);
+
+  if (move.length() > 0){
     move.normalize();
-    velocity.x = move.x * speed;
-    velocity.z = move.z * speed;
+    velocity.x = move.x * walkingSpeed;
+    velocity.z = move.z * walkingSpeed;
   } else {
-    velocity.x = THREE.MathUtils.lerp(velocity.x, 0, dt*8);
-    velocity.z = THREE.MathUtils.lerp(velocity.z, 0, dt*8);
+    // friction
+    velocity.x = THREE.MathUtils.lerp(velocity.x, 0, dt*6);
+    velocity.z = THREE.MathUtils.lerp(velocity.z, 0, dt*6);
   }
 
-  // gravity & jumping (very simple)
-  if(onGround && keys['Space']){
-    velocity.y = JUMP_VEL;
-    onGround = false;
-  } else if(!onGround){
-    velocity.y -= GRAVITY * dt;
-  }
+  // jumping
+  if (onGround && keys['Space']) { velocity.y = CONFIG.JUMP_VELOCITY; onGround = false; }
 
-  player.position.addScaledVector(velocity, dt);
-
-  if(player.position.y <= 2){
-    player.position.y = 2;
+  // gravity
+  if (!onGround){ velocity.y -= CONFIG.GRAVITY * dt; }
+  // integrate
+  playerObj.position.addScaledVector(velocity, dt);
+  // ground collision
+  if (playerObj.position.y <= CONFIG.PLAYER_HEIGHT){
+    playerObj.position.y = CONFIG.PLAYER_HEIGHT;
     velocity.y = 0;
     onGround = true;
   }
 
-  // try enter vehicle
-  if(keys['KeyE']){
-    if(tryEnterNearestCar()){
-      keys['KeyE'] = false;
-    }
+  // interact: enter nearest car
+  if (keys['KeyE']) {
+    if (tryEnterNearestCar()) keys['KeyE'] = false;
   }
 }
 
-function tryEnterNearestCar(){
-  if(inVehicle) return false;
-  let nearest = null;
-  let nearestDist = 9999;
-  for(let car of cars){
-    if(car.userData.driver !== null) continue; // taken
-    let dist = player.position.distanceTo(car.position);
-    if(dist < 3.2 && dist < nearestDist){
-      nearest = car;
-      nearestDist = dist;
+// ---------- VEHICLE PHYSICS (approximate) ----------
+function updateVehiclePhysics(dt, car){
+  if (!car) return;
+  const ud = car.userData;
+
+  // inputs only if car has driver
+  if (ud.driver){
+    // acceleration/brake controls
+    if (keys['KeyW']) ud.accel = ud.maxAccel;
+    else if (keys['KeyS']) ud.accel = -ud.maxBrake;
+    else ud.accel = 0;
+
+    // steering (gradual)
+    if (Math.abs(ud.speed) > 0.5){
+      if (keys['KeyA']) ud.steering = Math.min(ud.steering + 0.06, ud.maxSteering);
+      else if (keys['KeyD']) ud.steering = Math.max(ud.steering - 0.06, -ud.maxSteering);
+      else {
+        if (ud.steering > 0) ud.steering = Math.max(0, ud.steering - 0.04);
+        else ud.steering = Math.min(0, ud.steering + 0.04);
+      }
+    } else ud.steering = 0;
+
+    // update speed
+    ud.speed += ud.accel * dt;
+    if (ud.speed > ud.maxSpeed) ud.speed = ud.maxSpeed;
+    if (ud.speed < ud.maxReverse) ud.speed = ud.maxReverse;
+
+    // friction when no accel
+    if (ud.accel === 0){
+      if (ud.speed > 0) ud.speed = Math.max(0, ud.speed - ud.maxBrake * dt * 0.35);
+      else if (ud.speed < 0) ud.speed = Math.min(0, ud.speed + ud.maxBrake * dt * 0.35);
     }
+
+    // move and steer
+    const forward = new THREE.Vector3(0,0,-1).applyQuaternion(car.quaternion);
+    car.position.addScaledVector(forward, ud.speed * dt);
+    if (ud.steering !== 0){
+      const turnEffect = (ud.speed / 5) * ud.steering;
+      car.rotation.y += turnEffect * dt;
+    }
+
+    // HUD speed update (km/h)
+    hudSpeed.innerText = Math.round(ud.speed * 3.6);
+    hudMode.innerText = 'Driving';
+  } else {
+    hudMode.innerText = 'On Foot';
+    hudSpeed.innerText = Math.round(0);
   }
-  if(nearest){
-    enterVehicle(nearest);
-    return true;
+
+  // exit car handling (E)
+  if (keys['KeyE'] && ud.driver){
+    exitVehicle(car);
+    keys['KeyE'] = false;
   }
+}
+
+// ---------- ENTER / EXIT CAR ----------
+function tryEnterNearestCar(){
+  if (inVehicle) return false;
+  let nearest = null; let nd = 9999;
+  for (const c of cars){
+    if (c.userData.driver) continue; // already occupied
+    const d = c.position.distanceTo(playerObj.position);
+    if (d < 3.2 && d < nd){ nearest = c; nd = d; }
+  }
+  if (nearest){ enterVehicle(nearest); return true; }
   return false;
 }
 
 function enterVehicle(car){
   inVehicle = true;
-  currentCar = car;
-  car.userData.driver = player;
-  // attach camera to car
-  car.add(camera);
-  camera.position.set(0,1.1,-3.6);
+  currentVehicle = car;
+  car.userData.driver = username || 'Player';
+  // move camera to vehicle
+  car.add(cameraPivot); // attach pivot to car
+  cameraPivot.position.set(0, 1.1, -3.6);
   camera.rotation.set(0,0,0);
+  showMessage('Entered vehicle. WASD drive, E exit.', 2.2);
   hudMode.innerText = 'Driving';
-  showMessage('Entered vehicle. WASD to drive, E to exit.', 3);
 }
 
-function exitVehicle(){
-  if(!inVehicle) return;
+function exitVehicle(car){
+  if (!car) return;
+  // detach camera pivot to player position
+  scene.add(cameraPivot);
+  cameraPivot.position.set(0, 0, 0);
+  playerObj.add(cameraPivot);
+  // place player next to car
+  playerObj.position.copy(car.position).add(new THREE.Vector3(2, CONFIG.PLAYER_HEIGHT, 0));
+  car.userData.driver = null;
   inVehicle = false;
-  if(currentCar){
-    currentCar.userData.driver = null;
-    scene.add(camera);
-    camera.position.set(0,1.6,0);
-    player.add(camera);
-    // place player next to car
-    let offset = new THREE.Vector3(2,0,0).applyQuaternion(currentCar.quaternion);
-    player.position.copy(currentCar.position).add(offset);
-    currentCar = null;
-  }
+  currentVehicle = null;
   hudMode.innerText = 'On Foot';
   hudSpeed.innerText = '0';
-  showMessage('Exited vehicle.', 2);
+  showMessage('Exited vehicle', 1.2);
 }
 
-function updateVehicle(dt){
-  if(!currentCar) return;
-  const car = currentCar;
-  const ud = car.userData;
+// ---------- COLLISION AVOIDANCE (very simple) ----------
+function avoidCollision(entityA, entityB, dt){
+  const dist = entityA.position.distanceTo(entityB.position);
+  const minDist = 1.2 + (entityB.geometry && entityB.geometry.boundingSphere ? entityB.geometry.boundingSphere.radius : 0.6);
+  if (dist < minDist && dist > 0.001){
+    const push = entityA.position.clone().sub(entityB.position).normalize().multiplyScalar((minDist - dist) * 0.6);
+    entityA.position.add(push.multiplyScalar(dt*10));
+  }
+}
 
-  // Acceleration/braking input
-  if(keys['KeyW']){
-    ud.acceleration = ud.maxAcceleration;
-  } else if(keys['KeyS']){
-    ud.acceleration = -ud.maxBrake;
+// ---------- LABELS UPDATE ----------
+function updateLabels(){
+  // update DOM labels for cars and npcs
+  labelsContainer.querySelectorAll('.label3d').forEach(el => el.style.display = 'none');
+  // player label (top center)
+  updateLabelPositionFor('Player', playerObj.position.clone().add(new THREE.Vector3(0,2,0)), getOrCreateLabel('playerLabel', username || 'You'));
+
+  // cars labels
+  cars.forEach((c, i) => {
+    updateLabelPositionFor(`CAR #${i+1}`, c.position.clone().add(new THREE.Vector3(0,1.6,0)), getOrCreateLabel(`carLabel${i}`, `Car ${i+1}`));
+  });
+  // NPCs
+  npcs.forEach((n,i) => {
+    updateLabelPositionFor('NPC', n.position.clone().add(new THREE.Vector3(0,1.1,0)), getOrCreateLabel(`npc${i}`, `NPC`));
+  });
+}
+
+function getOrCreateLabel(id, text){
+  let el = document.getElementById(id);
+  if (!el){
+    el = document.createElement('div');
+    el.id = id; el.className = 'label3d'; el.innerText = text;
+    labelsContainer.appendChild(el);
+  }
+  return el;
+}
+
+function updateLabelPositionFor(text, worldPos, el){
+  const p = worldPos.clone().project(camera);
+  const x = (p.x * 0.5 + 0.5) * window.innerWidth;
+  const y = (-p.y * 0.5 + 0.5) * window.innerHeight;
+  if (p.z > 1 || p.z < -1){
+    el.style.display = 'none';
   } else {
-    ud.acceleration = 0;
-  }
-
-  // Steering input (only if moving)
-  if(ud.speed > 0.5 || ud.speed < -0.5){
-    if(keys['KeyA']){
-      ud.steering = Math.min(ud.steering + 0.05, ud.maxSteering);
-    } else if(keys['KeyD']){
-      ud.steering = Math.max(ud.steering - 0.05, -ud.maxSteering);
-    } else {
-      // return steering to 0 gradually
-      if(ud.steering > 0) ud.steering = Math.max(0, ud.steering - 0.04);
-      else if(ud.steering < 0) ud.steering = Math.min(0, ud.steering + 0.04);
-    }
-  } else {
-    ud.steering = 0;
-  }
-
-  // Update speed with acceleration
-  ud.speed += ud.acceleration * dt;
-  if(ud.speed > ud.maxSpeed) ud.speed = ud.maxSpeed;
-  if(ud.speed < ud.maxReverseSpeed) ud.speed = ud.maxReverseSpeed;
-
-  // Apply friction if no acceleration
-  if(ud.acceleration === 0){
-    if(ud.speed > 0){
-      ud.speed = Math.max(0, ud.speed - ud.maxBrake * dt * 0.4);
-    } else if(ud.speed < 0){
-      ud.speed = Math.min(0, ud.speed + ud.maxBrake * dt * 0.4);
-    }
-  }
-
-  // Move car forward
-  let forward = new THREE.Vector3(0,0,-1).applyQuaternion(car.quaternion);
-  car.position.addScaledVector(forward, ud.speed * dt);
-
-  // Apply steering to rotation (turning)
-  let turnRadius = 5; // smaller radius = sharper turn
-  if(ud.steering !== 0){
-    let angularVelocity = ud.speed / turnRadius * ud.steering;
-    car.rotation.y += angularVelocity * dt;
-  }
-
-  // Update speed for HUD in km/h
-  hudSpeed.innerText = Math.round(ud.speed / KMH_TO_MPS);
-
-  // Exit vehicle with E
-  if(keys['KeyE']){
-    exitVehicle();
-    keys['KeyE'] = false;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.style.display = 'block';
   }
 }
 
-function resetPlayer(){
-  player.position.set(0,2,8);
-  velocity.set(0,0,0);
-  cameraPitch = 0; cameraYaw = 0;
-  player.rotation.set(0,0,0);
-  updateHUD();
+// ---------- MINI-MAP ----------
+function setupMinimap(){
+  const mm = document.getElementById('minimap');
+  minimapCanvas = document.createElement('canvas');
+  minimapCanvas.width = 148; minimapCanvas.height = 148;
+  minimapCanvas.style.width = '100%'; minimapCanvas.style.height = '100%';
+  mm.appendChild(minimapCanvas);
+  minimapCtx = minimapCanvas.getContext('2d');
 }
 
-function resetGame(){
-  // Reset player and cars
-  resetPlayer();
-  for(let i=0; i<cars.length; i++){
-    let c = cars[i];
-    // Reset positions (hardcoded for demo)
-    if(i===0) c.position.set(4,0.6,6);
-    else if(i===1) c.position.set(-12,0.6,-8);
-    else if(i===2) c.position.set(15,0.6,-10);
-    c.userData.speed = 0;
-    c.userData.acceleration = 0;
-    c.userData.steering = 0;
-    c.userData.driver = null;
-  }
-  if(inVehicle) exitVehicle();
-  health = 100;
-  hudHealth.innerText = health;
-  showMessage('Game reset', 1);
+function drawMinimap(){
+  if (!minimapCtx) return;
+  const w = minimapCanvas.width, h = minimapCanvas.height;
+  minimapCtx.fillStyle = '#111'; minimapCtx.fillRect(0,0,w,h);
+  // center is player
+  const scale = 0.8;
+  const centerX = w/2, centerY = h/2;
+  // draw nearby cars
+  cars.forEach(c => {
+    const dx = (c.position.x - playerObj.position.x) * (scale/CONFIG.CITY_SIZE) * w;
+    const dz = (c.position.z - playerObj.position.z) * (scale/CONFIG.CITY_SIZE) * h;
+    minimapCtx.fillStyle = '#0af'; minimapCtx.fillRect(centerX + dx - 3, centerY + dz - 3, 6, 6);
+  });
+  // draw npcs
+  npcs.forEach(n => {
+    const dx = (n.position.x - playerObj.position.x) * (scale/CONFIG.CITY_SIZE) * w;
+    const dz = (n.position.z - playerObj.position.z) * (scale/CONFIG.CITY_SIZE) * h;
+    minimapCtx.fillStyle = '#f44'; minimapCtx.fillRect(centerX + dx - 2, centerY + dz - 2, 4, 4);
+  });
+  // draw player
+  minimapCtx.fillStyle = '#fff'; minimapCtx.beginPath(); minimapCtx.arc(centerX, centerY, 4, 0, Math.PI*2); minimapCtx.fill();
 }
 
-function updateHUD(){
-  hudHealth.innerText = health;
-}
-
+// ---------- UTILS & UI ----------
 function showMessage(text, seconds=2){
-  messages.style.display = 'block';
-  messages.innerText = text;
-  if(seconds>0){
-    setTimeout(()=>{ messages.style.display='none'; }, seconds*1000);
-  }
+  centerMsg.style.display = 'block';
+  centerMsg.innerText = text;
+  if (seconds > 0) setTimeout(()=> centerMsg.style.display = 'none', seconds*1000);
 }
 
+function resetWorld(){
+  // reset player pos and cars
+  playerObj.position.set(0, CONFIG.PLAYER_HEIGHT, 6);
+  playerObj.rotation.set(0,0,0);
+  velocity.set(0,0,0);
+  cars.forEach((c,i)=> {
+    if (i===0) c.position.set(4,0.6,6);
+    if (i===1) c.position.set(-12,0.6,-8);
+    if (i===2) c.position.set(15,0.6,-10);
+    c.userData.speed = 0; c.userData.driver = null;
+  });
+  npcs.forEach(n => { n.position.set((Math.random()-0.5)*CONFIG.CITY_SIZE, 0.6, (Math.random()-0.5)*CONFIG.CITY_SIZE); n.userData.state='wander'; });
+  showMessage('World reset', 1.2);
+}
+
+// ---------- INPUT: Enter to toggle name save (helper) ----------
+document.getElementById('name').addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') document.getElementById('saveName').click();
+});
+
+// ---------- WINDOW RESIZE ----------
 function onWindowResize(){
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 }
+
+// ---------- START ----------
+init();
+animate();
+
+/* ---------- Multiplayer Hook (comment)
+   To add multiplayer later:
+   - Add socket.io client <script src="/socket.io/socket.io.js"></script> or import via CDN
+   - Connect to server: const socket = io("https://your-server");
+   - After login, emit 'auth' with token, then regularly emit update_state { pos, rot, action }
+   - Listen for other players' states and spawn remote avatars (similar to NPCs but update position via interpolation)
+   - For authoritative actions (vehicle ownership, NPCs), implement server-side logic and broadcast events.
+   Example: socket.emit('update_state', { pos: playerObj.position, rot: playerObj.rotation, inVehicle: !!currentVehicle })
+   Server will broadcast to other clients and maintain authoritative saves.
+   ---------- */
 
 </script>
 </body>
